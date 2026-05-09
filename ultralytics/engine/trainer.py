@@ -444,6 +444,11 @@ class BaseTrainer:
                                 f"NaN/Inf loss detected at step {ni}. Skipping backward pass. "
                                 "Consider reducing learning rate or using SGD optimizer."
                             )
+                            if RANK != -1:
+                                skip_flag = torch.tensor([1], device=self.device, dtype=torch.int32)
+                                torch.distributed.all_reduce(skip_flag)
+                                if skip_flag.item() > 0:
+                                    raise ValueError("NaN/Inf detected in loss, aborting training")
                             batch = loss = preds = None
                             self.loss = self.loss_items = None
                             continue
@@ -653,7 +658,8 @@ class BaseTrainer:
             return False
 
         # Move EMA tensors to CPU before serialization to avoid Windows/CUDA access violations (issue #24077)
-        ema = ema.apply(_to_cpu)
+        for p in ema.parameters():
+            p.data = p.data.cpu().clone()
 
         # Convert optimizer state to FP16 and move tensors to CPU
         optimizer_state = convert_optimizer_state_dict_to_fp16(deepcopy(self.optimizer.state_dict()))
@@ -1028,7 +1034,7 @@ class BaseTrainer:
             self.args.warmup_bias_lr = 0.0  # no higher than 0.01 for Adam
 
         use_muon = name == "MuSGD"
-        use_adamw = name == "AdamW"
+        use_adamw = name.lower() == "adamw"
         for module_name, module in unwrap_model(model).named_modules():
             for param_name, param in module.named_parameters(recurse=False):
                 fullname = f"{module_name}.{param_name}" if module_name else param_name
